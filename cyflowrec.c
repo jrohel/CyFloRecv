@@ -17,11 +17,12 @@
 #include <unistd.h>
 
 
-static const char CYFLOWREC_VERSION[] = "0.1.0";
+static const char CYFLOWREC_VERSION[] = "0.2.0";
 
 static const char ARG_HELP[] = "--help";
 static const char ARG_PORT_DEV[] = "--port-dev";
 static const char ARG_STORAGE_DIR[] = "--storage-dir";
+static const char ARG_STORAGE_CREATE_DIRS[] = "--storage-create-dirs";
 
 
 enum log_priority { LOG_ERROR, LOG_WARNING, LOG_INFO, LOG_DEBUG };
@@ -30,6 +31,7 @@ static const char * const log_priority_strings[] = {"ERROR", "WARNING", "INFO", 
 
 static const char * port_dev = NULL;
 static const char * storage_dir = NULL;
+static bool storage_create_dirs = false;
 
 
 static char * my_strdup(const char * src) {
@@ -101,6 +103,26 @@ static void log_fmtmsg(enum log_priority priority, const char * restrict message
     va_end(ap);
     log_msg(priority, message);
     free(message);
+}
+
+
+// Creates every missing directory in path.
+// If the path does not end with '/', the last element is treated as a filename and is not created.
+static bool mkdirs(const char * path) {
+    char * const path_tmp = my_strdup(path);
+    char * sep = strchr(path_tmp + 1, '/');
+    while (sep) {
+        *sep = '\0';
+        if (mkdir(path_tmp, 0755) == -1 && errno != EEXIST) {
+            log_fmtmsg(LOG_ERROR, "Cannot create directory \"%s\": %s", path_tmp, strerror(errno));
+            free(path_tmp);
+            return false;
+        }
+        *sep = '/';
+        sep = strchr(sep + 1, '/');
+    }
+    free(path_tmp);
+    return true;
 }
 
 
@@ -353,6 +375,9 @@ static void recv_loop() {
                         break;
                     }
                     storage_file_path = sprintf_malloc("%s/%s", storage_dir, rcv_file_name);
+                    if (storage_create_dirs) {
+                        mkdirs(storage_file_path);
+                    }
                     file_fd =
                         open(storage_file_path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
                     if (file_fd == -1) {
@@ -432,7 +457,12 @@ static void recv_loop() {
 
 static void print_help() {
     printf("CyFlowRec %s\n", CYFLOWREC_VERSION);
-    printf("Usage: cyflowrec %s=<path> %s=<port> [%s]\n", ARG_STORAGE_DIR, ARG_PORT_DEV, ARG_HELP);
+    printf(
+        "Usage: cyflowrec %s=<path> %s=<port> [%s=<0/1>] [%s]\n",
+        ARG_STORAGE_DIR,
+        ARG_PORT_DEV,
+        ARG_STORAGE_CREATE_DIRS,
+        ARG_HELP);
 }
 
 
@@ -471,6 +501,7 @@ static bool arg_parse_value(int argc, char * argv[], int * idx, const char * arg
 
 int main(int argc, char * argv[]) {
     bool args_error = false;
+    const char * create_dirs = NULL;
 
     for (int i = 1; i < argc;) {
         const int parsed_idx = i;
@@ -478,6 +509,9 @@ int main(int argc, char * argv[]) {
             return 1;
         }
         if (!arg_parse_value(argc, argv, &i, ARG_STORAGE_DIR, &storage_dir)) {
+            return 1;
+        }
+        if (!arg_parse_value(argc, argv, &i, ARG_STORAGE_CREATE_DIRS, &create_dirs)) {
             return 1;
         }
         if (i < argc && strcmp(argv[i], ARG_HELP) == 0) {
@@ -499,6 +533,16 @@ int main(int argc, char * argv[]) {
         fprintf(stderr, "Missing %s=<port> argument\n", ARG_PORT_DEV);
         args_error = true;
     }
+
+    if (create_dirs) {
+        if (strcmp(create_dirs, "1") == 0) {
+            storage_create_dirs = true;
+        } else if (strcmp(create_dirs, "0") != 0) {
+            fprintf(stderr, "Bad value for argument %s: %s\n", ARG_STORAGE_CREATE_DIRS, create_dirs);
+            args_error = true;
+        }
+    }
+
     if (args_error) {
         fprintf(stderr, "Add \"--help\" for more information about the arguments.\n");
         return 1;
