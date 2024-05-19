@@ -17,7 +17,7 @@
 #include <unistd.h>
 
 
-static const char CYFLOWREC_VERSION[] = "0.2.0";
+static const char CYFLOWREC_VERSION[] = "0.2.1";
 
 static const char ARG_HELP[] = "--help";
 static const char ARG_PORT_DEV[] = "--port-dev";
@@ -456,13 +456,39 @@ static void recv_loop() {
 
 
 static void print_help() {
-    printf("CyFlowRec %s\n", CYFLOWREC_VERSION);
+    const int LEFT_COLUMN_WIDTH = 30;
+
+    printf("CyFlowRec version %s, Copyright 2024 Jaroslav Rohel <jaroslav.rohel@gmail.com>\n", CYFLOWREC_VERSION);
     printf(
-        "Usage: cyflowrec %s=<path> %s=<port> [%s=<0/1>] [%s]\n",
-        ARG_STORAGE_DIR,
+        "CyFlowRec comes with ABSOLUTELY NO WARRANTY. This is free software\n"
+        "and you are welcome to redistribute it under the terms of the GNU GPL v2.\n\n");
+
+    printf(
+        "Usage: cyflowrec [%s] %s=<port> %s=<path> [%s=<0/1>]\n\n",
+        ARG_HELP,
         ARG_PORT_DEV,
+        ARG_STORAGE_DIR,
+        ARG_STORAGE_CREATE_DIRS);
+
+    printf("%s%*sprint this help\n", ARG_HELP, (int)(LEFT_COLUMN_WIDTH - sizeof(ARG_HELP)), "");
+    printf(
+        "%s=<path>%*spath to the serial port device (e.g. /dev/ttyS0)\n",
+        ARG_PORT_DEV,
+        (int)(LEFT_COLUMN_WIDTH - sizeof(ARG_PORT_DEV) - 7),
+        "");
+    printf(
+        "%s=<0/1>%*sdisable/enable the creation of missing directories in the storage path\n"
+        "%*s(0 - disable, 1 - enable; disabled by default)\n",
         ARG_STORAGE_CREATE_DIRS,
-        ARG_HELP);
+        (int)(LEFT_COLUMN_WIDTH - sizeof(ARG_STORAGE_CREATE_DIRS) - 6),
+        "",
+        LEFT_COLUMN_WIDTH,
+        "");
+    printf(
+        "%s=<path>%*spath to the storage directory\n",
+        ARG_STORAGE_DIR,
+        (int)(LEFT_COLUMN_WIDTH - sizeof(ARG_STORAGE_DIR) - 7),
+        "");
 }
 
 
