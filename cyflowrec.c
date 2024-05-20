@@ -17,7 +17,7 @@
 #include <unistd.h>
 
 
-static const char CYFLOWREC_VERSION[] = "0.2.1";
+static const char CYFLOWREC_VERSION[] = "0.2.2";
 
 static const char ARG_HELP[] = "--help";
 static const char ARG_PORT_DEV[] = "--port-dev";
@@ -189,7 +189,7 @@ static ssize_t read_timeout(int fd, void * buf, size_t nbytes, int timeout) {
 static void recv_loop() {
     int port_fd;
     if ((port_fd = open(port_dev, O_RDWR | O_NOCTTY)) == -1) {
-        log_fmtmsg(LOG_ERROR, "Cannot open port %s: %s", port_dev, strerror(errno));
+        log_fmtmsg(LOG_ERROR, "Cannot open port \"%s\": %s", port_dev, strerror(errno));
         return;
     }
     if (!set_port(port_fd)) {
@@ -375,17 +375,24 @@ static void recv_loop() {
                         break;
                     }
                     storage_file_path = sprintf_malloc("%s/%s", storage_dir, rcv_file_name);
+                    log_fmtmsg(
+                        LOG_INFO,
+                        "Incoming file \"%s\" with length %u will be stored in \"%s\"",
+                        rcv_file_name,
+                        (unsigned int)rcv_file_size,
+                        storage_file_path);
                     if (storage_create_dirs) {
                         mkdirs(storage_file_path);
                     }
                     file_fd =
                         open(storage_file_path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
                     if (file_fd == -1) {
-                        log_fmtmsg(LOG_ERROR, "Cannot open/create file %s: %s", storage_file_path, strerror(errno));
-                        state = READ_DISCARD_UNTIL_TIMEOUT;
-                        buf_data_len = 0;
-                        requested_reading_len = sizeof(buf);
-                        break;
+                        log_fmtmsg(
+                            LOG_ERROR,
+                            "Cannot open/create file \"%s\", received file \"%s\" will no be stored: %s",
+                            storage_file_path,
+                            rcv_file_name,
+                            strerror(errno));
                     }
                     state = READ_FILE;
                     buf_data_len = 1;
@@ -398,28 +405,38 @@ static void recv_loop() {
                 buf_data_len += read_len;
                 total_rcv_file_bytes += buf_data_len;
 
-                size_t written = 0;
-                do {
-                    const ssize_t write_ret = write(file_fd, buf + written, buf_data_len - written);
-                    if (write_ret == -1) {
-                        log_fmtmsg(LOG_ERROR, "Cannot write to file %s: %s", storage_file_path, strerror(errno));
-                        break;
-                    }
-                    written += write_ret;
-                } while (written < buf_data_len);
-                if (written < buf_data_len) {
-                    state = READ_DISCARD_UNTIL_TIMEOUT;
-                    buf_data_len = 0;
-                    requested_reading_len = sizeof(buf);
-                    break;
+                if (file_fd != -1) {
+                    size_t written = 0;
+                    do {
+                        const ssize_t write_ret = write(file_fd, buf + written, buf_data_len - written);
+                        if (write_ret == -1) {
+                            log_fmtmsg(
+                                LOG_ERROR,
+                                "Cannot write to file \"%s\", received file \"%s\" will be truncated: %s",
+                                storage_file_path,
+                                rcv_file_name,
+                                strerror(errno));
+                            close(file_fd);
+                            file_fd = -1;
+                            break;
+                        }
+                        written += write_ret;
+                    } while (written < buf_data_len);
                 }
 
                 buf_data_len = 0;
                 if (total_rcv_file_bytes >= rcv_file_size) {
-                    close(file_fd);
-                    file_fd = -1;
-                    log_fmtmsg(
-                        LOG_INFO, "Successfully received file %s, saved as %s", rcv_file_name, storage_file_path);
+                    if (file_fd != -1) {
+                        close(file_fd);
+                        file_fd = -1;
+                        log_fmtmsg(
+                            LOG_INFO,
+                            "The file \"%s\" was received and saved as \"%s\"",
+                            rcv_file_name,
+                            storage_file_path);
+                    } else {
+                        log_fmtmsg(LOG_INFO, "The file \"%s\" was received but discarded or truncated", rcv_file_name);
+                    }
                     free(storage_file_path);
                     storage_file_path = NULL;
                     free(rcv_file_name);
