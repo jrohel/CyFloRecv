@@ -17,22 +17,25 @@
 #include <unistd.h>
 
 
-static const char CYFLOWREC_VERSION[] = "0.2.2";
+static const char CYFLOWREC_VERSION[] = "0.3.0";
 
 static const char ARG_HELP[] = "--help";
 static const char ARG_PORT_DEV[] = "--port-dev";
-static const char ARG_STORAGE_DIR[] = "--storage-dir";
 static const char ARG_STORAGE_CREATE_DIRS[] = "--storage-create-dirs";
+static const char ARG_STORAGE_DIR[] = "--storage-dir";
+static const char ARG_STORAGE_FILE_EXISTS[] = "--storage-file-exists";
 
 
 enum log_priority { LOG_ERROR, LOG_WARNING, LOG_INFO, LOG_DEBUG };
 static const char * const log_priority_strings[] = {"ERROR", "WARNING", "INFO", "DEBUG"};
 
 
-static const char * port_dev = NULL;
-static const char * storage_dir = NULL;
-static bool storage_create_dirs = false;
+enum storage_file_exists_policy { FILE_REPLACE, FILE_DROP };
 
+static const char * port_dev = NULL;
+static bool storage_create_dirs = false;
+static const char * storage_dir = NULL;
+static enum storage_file_exists_policy file_exists_policy = FILE_REPLACE;
 
 static char * my_strdup(const char * src) {
     const size_t size = strlen(src) + 1;
@@ -385,14 +388,38 @@ static void recv_loop() {
                         mkdirs(storage_file_path);
                     }
                     file_fd =
-                        open(storage_file_path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+                        open(storage_file_path, O_WRONLY | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
                     if (file_fd == -1) {
-                        log_fmtmsg(
-                            LOG_ERROR,
-                            "Cannot open/create file \"%s\", received file \"%s\" will no be stored: %s",
-                            storage_file_path,
-                            rcv_file_name,
-                            strerror(errno));
+                        const int origin_errno = errno;
+                        if (origin_errno == EEXIST) {
+                            if (file_exists_policy == FILE_REPLACE) {
+                                log_fmtmsg(
+                                    LOG_WARNING,
+                                    "The file \"%s\" already exists in the storage and will be replaced by "
+                                    "the received file \"%s\"",
+                                    storage_file_path,
+                                    rcv_file_name);
+                                file_fd = open(
+                                    storage_file_path,
+                                    O_WRONLY | O_CREAT | O_TRUNC,
+                                    S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+                            } else {
+                                log_fmtmsg(
+                                    LOG_WARNING,
+                                    "The file \"%s\" already exists in the storage, the received file \"%s\" "
+                                    "will be dropped",
+                                    storage_file_path,
+                                    rcv_file_name);
+                            }
+                        }
+                        if (file_fd == -1 && (origin_errno != EEXIST || file_exists_policy == FILE_REPLACE)) {
+                            log_fmtmsg(
+                                LOG_ERROR,
+                                "Cannot open/create file \"%s\", received file \"%s\" will no be stored: %s",
+                                storage_file_path,
+                                rcv_file_name,
+                                strerror(errno));
+                        }
                     }
                     state = READ_FILE;
                     buf_data_len = 1;
@@ -473,31 +500,35 @@ static void recv_loop() {
 
 
 static void print_help() {
-    const int LEFT_COLUMN_WIDTH = 30;
+    const int LEFT_COLUMN_WIDTH = 33;
 
-    printf("CyFlowRec version %s, Copyright 2024 Jaroslav Rohel <jaroslav.rohel@gmail.com>\n", CYFLOWREC_VERSION);
+    printf("CyFlowRec %s, Copyright 2024 Jaroslav Rohel <jaroslav.rohel@gmail.com>\n", CYFLOWREC_VERSION);
     printf(
         "CyFlowRec comes with ABSOLUTELY NO WARRANTY. This is free software\n"
         "and you are welcome to redistribute it under the terms of the GNU GPL v2.\n\n");
 
     printf(
-        "Usage: cyflowrec [%s] %s=<port> %s=<path> [%s=<0/1>]\n\n",
+        "Usage: cyflowrec [%s] %s=<port> [%s=<policy>] %s=<path> [%s=<0/1>]\n\n",
         ARG_HELP,
         ARG_PORT_DEV,
+        ARG_STORAGE_FILE_EXISTS,
         ARG_STORAGE_DIR,
         ARG_STORAGE_CREATE_DIRS);
 
     printf("%s%*sprint this help\n", ARG_HELP, (int)(LEFT_COLUMN_WIDTH - sizeof(ARG_HELP)), "");
     printf(
-        "%s=<path>%*spath to the serial port device (e.g. /dev/ttyS0)\n",
+        "%s=<path>%*spath to the serial port device (eg /dev/ttyS0)\n",
         ARG_PORT_DEV,
         (int)(LEFT_COLUMN_WIDTH - sizeof(ARG_PORT_DEV) - 7),
         "");
     printf(
-        "%s=<0/1>%*sdisable/enable the creation of missing directories in the storage path\n"
+        "%s=<0/1>%*sdisable/enable the creation of missing\n"
+        "%*sdirectories in the storage path\n"
         "%*s(0 - disable, 1 - enable; disabled by default)\n",
         ARG_STORAGE_CREATE_DIRS,
         (int)(LEFT_COLUMN_WIDTH - sizeof(ARG_STORAGE_CREATE_DIRS) - 6),
+        "",
+        LEFT_COLUMN_WIDTH,
         "",
         LEFT_COLUMN_WIDTH,
         "");
@@ -505,6 +536,23 @@ static void print_help() {
         "%s=<path>%*spath to the storage directory\n",
         ARG_STORAGE_DIR,
         (int)(LEFT_COLUMN_WIDTH - sizeof(ARG_STORAGE_DIR) - 7),
+        "");
+    printf(
+        "%s=<policy>%*swhat to do if a file with the given name\n"
+        "%*salready exists in the storage\n"
+        "%*s(drop - drop the received file, replace -\n"
+        "%*sreplace the file in storage with\n"
+        "%*sthe received one; replace by default)\n",
+        ARG_STORAGE_FILE_EXISTS,
+        (int)(LEFT_COLUMN_WIDTH - sizeof(ARG_STORAGE_FILE_EXISTS) - 9),
+        "",
+        LEFT_COLUMN_WIDTH,
+        "",
+        LEFT_COLUMN_WIDTH,
+        "",
+        LEFT_COLUMN_WIDTH,
+        "",
+        LEFT_COLUMN_WIDTH,
         "");
 }
 
@@ -545,6 +593,7 @@ static bool arg_parse_value(int argc, char * argv[], int * idx, const char * arg
 int main(int argc, char * argv[]) {
     bool args_error = false;
     const char * create_dirs = NULL;
+    const char * file_exists = NULL;
 
     for (int i = 1; i < argc;) {
         const int parsed_idx = i;
@@ -555,6 +604,9 @@ int main(int argc, char * argv[]) {
             return 1;
         }
         if (!arg_parse_value(argc, argv, &i, ARG_STORAGE_CREATE_DIRS, &create_dirs)) {
+            return 1;
+        }
+        if (!arg_parse_value(argc, argv, &i, ARG_STORAGE_FILE_EXISTS, &file_exists)) {
             return 1;
         }
         if (i < argc && strcmp(argv[i], ARG_HELP) == 0) {
@@ -582,6 +634,15 @@ int main(int argc, char * argv[]) {
             storage_create_dirs = true;
         } else if (strcmp(create_dirs, "0") != 0) {
             fprintf(stderr, "Bad value for argument %s: %s\n", ARG_STORAGE_CREATE_DIRS, create_dirs);
+            args_error = true;
+        }
+    }
+
+    if (file_exists) {
+        if (strcmp(file_exists, "drop") == 0) {
+            file_exists_policy = FILE_DROP;
+        } else if (strcmp(file_exists, "replace") != 0) {
+            fprintf(stderr, "Bad value for argument %s: %s\n", ARG_STORAGE_FILE_EXISTS, file_exists);
             args_error = true;
         }
     }

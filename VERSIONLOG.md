@@ -31,3 +31,20 @@
 
     In this version, only the file that failed to save is discarded/truncated.
     The following files are not affected.
+
+
+\[0.3.0] - 2024-05-22
+---------------------
+- Added command line argument `--storage-file-exists=<policy>`
+
+    Defines what to do if a file with the given name already exists
+    in the storage.
+
+    - `drop`     - drop the received file
+    - `replace`  - replace the file in storage with the received one
+
+    `replace` is the default
+
+    If a received file is dropped or a file in the storage is replaced,
+    a WARNING is printed. In previous versions, silent replacement of a file
+    in the storage occurred.
