@@ -48,3 +48,31 @@
     If a received file is dropped or a file in the storage is replaced,
     a WARNING is printed. In previous versions, silent replacement of a file
     in the storage occurred.
+
+
+\[0.4.0] - 2024-05-24
+---------------------
+- Added command line argument `--storage-file-path=<path>`
+
+    Defines the file path for storing the received file. Variables
+    substitution is performed.
+
+    Variable notation: `${<variable_name>}`
+
+    Supported variables: DATE_YEAR, DATE_MONTH, DATE_DAY, TIME_HOUR,
+                         TIME_MIN, TIME_SEC, RCV_NAME
+
+    The DATE and TIME variables are expressed in Coordinated Universal Time (UTC).
+
+    ### Example:
+
+    `./cyflowrec --port-dev=/dev/ttyUSB0 --storage-create-dirs=1
+     --storage-file-exists=drop
+     '--storage-file-path=/data/${DATE_YEAR}-${DATE_MONTH}-${DATE_DAY}/${RCV_NAME}'`
+
+    CyFlowRec is listening on the serial port `/dev/ttyUSB0`. The received file
+    is stored under the name received from the sender in the
+    `/data/YEAR-MONTH-DAY/` directory. The date represents when the file data
+    reception started. If the destination directory does not exist it is
+    created. If a file with the given name already exists in the directory,
+    the received file is dropped.

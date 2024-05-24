@@ -17,13 +17,14 @@
 #include <unistd.h>
 
 
-static const char CYFLOWREC_VERSION[] = "0.3.0";
+static const char CYFLOWREC_VERSION[] = "0.4.0";
 
 static const char ARG_HELP[] = "--help";
 static const char ARG_PORT_DEV[] = "--port-dev";
 static const char ARG_STORAGE_CREATE_DIRS[] = "--storage-create-dirs";
 static const char ARG_STORAGE_DIR[] = "--storage-dir";
 static const char ARG_STORAGE_FILE_EXISTS[] = "--storage-file-exists";
+static const char ARG_STORAGE_FILE_PATH[] = "--storage-file-path";
 
 
 enum log_priority { LOG_ERROR, LOG_WARNING, LOG_INFO, LOG_DEBUG };
@@ -36,6 +37,10 @@ static const char * port_dev = NULL;
 static bool storage_create_dirs = false;
 static const char * storage_dir = NULL;
 static enum storage_file_exists_policy file_exists_policy = FILE_REPLACE;
+static const char * storage_file_path = NULL;
+
+static char received_file_name[64];  // name of the currently receiving file
+
 
 static char * my_strdup(const char * src) {
     const size_t size = strlen(src) + 1;
@@ -46,6 +51,125 @@ static char * my_strdup(const char * src) {
     }
     memcpy(ret, src, size);
     return ret;
+}
+
+
+static void * realloc_assert(void * ptr, size_t size) {
+    void * const ret = realloc(ptr, size);
+    if (!ret) {
+        perror("strdup: malloc");
+        assert(ret != NULL);
+    }
+    return ret;
+}
+
+
+struct string {
+    size_t length;  // without trailing null byte
+    char * data;    // with trailing null byte
+};
+
+static void string_init(struct string * str) {
+    str->length = 0;
+    str->data = realloc_assert(NULL, 1);
+    *str->data = '\0';
+}
+
+static void string_append_csubstring(struct string * restrict dest, const char * restrict str, size_t substr_len) {
+    if (substr_len > 0) {
+        dest->data = realloc_assert(dest->data, dest->length + substr_len + 1);
+        memcpy(dest->data + dest->length, str, substr_len);
+        dest->length += substr_len;
+        dest->data[dest->length] = '\0';
+    }
+}
+
+
+struct subst_append_params {
+    const char * format;
+    size_t format_len;
+    const struct tm * time;
+};
+
+typedef void (*subst_func)(struct string * dest, const struct subst_append_params * params);
+
+static void subst_append_text(struct string * dest, const struct subst_append_params * params) {
+    const size_t format_len = params->format_len == (size_t)-1 ? strlen(params->format) : params->format_len;
+    string_append_csubstring(dest, params->format, format_len);
+}
+
+static void subst_append_date_year(struct string * dest, const struct subst_append_params * params) {
+    char buf[5];
+    size_t len = strftime(buf, sizeof(buf), "%Y", params->time);
+    string_append_csubstring(dest, buf, len);
+}
+
+static void subst_append_date_month(struct string * dest, const struct subst_append_params * params) {
+    char buf[3];
+    size_t len = strftime(buf, sizeof(buf), "%m", params->time);
+    string_append_csubstring(dest, buf, len);
+}
+
+static void subst_append_date_day(struct string * dest, const struct subst_append_params * params) {
+    char buf[3];
+    size_t len = strftime(buf, sizeof(buf), "%d", params->time);
+    string_append_csubstring(dest, buf, len);
+}
+
+static void subst_append_time_hour(struct string * dest, const struct subst_append_params * params) {
+    char buf[3];
+    size_t len = strftime(buf, sizeof(buf), "%H", params->time);
+    string_append_csubstring(dest, buf, len);
+}
+
+static void subst_append_time_min(struct string * dest, const struct subst_append_params * params) {
+    char buf[3];
+    size_t len = strftime(buf, sizeof(buf), "%M", params->time);
+    string_append_csubstring(dest, buf, len);
+}
+
+static void subst_append_time_sec(struct string * dest, const struct subst_append_params * params) {
+    char buf[3];
+    size_t len = strftime(buf, sizeof(buf), "%S", params->time);
+    string_append_csubstring(dest, buf, len);
+}
+
+static const struct func_name_pair {
+    subst_func func;
+    const char * name;
+} func_name_map[] = {
+    {subst_append_date_year, "DATE_YEAR"},
+    {subst_append_date_month, "DATE_MONTH"},
+    {subst_append_date_day, "DATE_DAY"},
+    {subst_append_time_hour, "TIME_HOUR"},
+    {subst_append_time_min, "TIME_MIN"},
+    {subst_append_time_sec, "TIME_SEC"},
+    {subst_append_text, "RCV_NAME"}};
+
+
+struct token {
+    subst_func func;
+    const char * format;
+    size_t format_len;
+};
+
+struct tokens {
+    size_t len;
+    struct token * items;
+};
+
+static char * create_file_path(struct tokens tokens) {
+    struct string path;
+    string_init(&path);
+    struct subst_append_params subst_params;
+    const time_t t = time(NULL);
+    subst_params.time = gmtime(&t);
+    for (size_t i = 0; i < tokens.len; ++i) {
+        subst_params.format = tokens.items[i].format;
+        subst_params.format_len = tokens.items[i].format_len;
+        tokens.items[i].func(&path, &subst_params);
+    }
+    return path.data;
 }
 
 
@@ -108,6 +232,73 @@ static void log_fmtmsg(enum log_priority priority, const char * restrict message
     free(message);
 }
 
+static struct tokens parse_storage_file_path(const char * in, const char * rcv_file_name) {
+    bool error = false;
+    const char * start_ptr = in;
+    const char * const in_end_ptr = strchr(in, '\0');
+    size_t token_items_len = 0;
+    struct token * token_items = NULL;
+    do {
+        const char * var_ptr = strstr(start_ptr, "${");
+        const int len = var_ptr - start_ptr;
+        if (len > 0) {
+            token_items = realloc_assert(token_items, (token_items_len + 1) * sizeof(struct token));
+            token_items[token_items_len].func = subst_append_text;
+            token_items[token_items_len].format = start_ptr;
+            token_items[token_items_len].format_len = len;
+            ++token_items_len;
+        }
+
+        if (!var_ptr) {
+            break;
+        }
+        var_ptr += 2;
+        const char * var_end_ptr = strstr(var_ptr, "}");
+        if (!var_end_ptr) {
+            log_fmtmsg(LOG_ERROR, "Syntax error: Incomplete variable name \"%s\"", var_ptr - 2);
+            error = true;
+            break;
+        }
+        const size_t var_len = var_end_ptr - var_ptr;
+        if (var_len == 0) {
+            log_fmtmsg(LOG_ERROR, "Syntax error: Empty variable name \"%s\"", var_ptr - 2);
+            error = true;
+            break;
+        }
+        bool found = false;
+        for (size_t i = 0; i < sizeof(func_name_map) / sizeof(func_name_map[0]); ++i) {
+            const char * const name = func_name_map[i].name;
+            const size_t name_len = strlen(name);
+            if (name_len == var_len && strncmp(name, var_ptr, name_len) == 0) {
+                token_items = realloc_assert(token_items, (token_items_len + 1) * sizeof(struct token));
+                token_items[token_items_len].func = func_name_map[i].func;
+                if (strcmp(name, "RCV_NAME") == 0) {
+                    token_items[token_items_len].format = rcv_file_name;
+                    token_items[token_items_len].format_len = -1;
+                } else {
+                    token_items[token_items_len].format = var_ptr;
+                    token_items[token_items_len].format_len = var_len;
+                }
+                ++token_items_len;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            log_fmtmsg(LOG_ERROR, "Error: Unknown variable in storage file path \"%.*s\"", var_len + 3, var_ptr - 2);
+            error = true;
+            break;
+        }
+        start_ptr = var_end_ptr + 1;
+    } while (start_ptr < in_end_ptr);
+
+    if (error) {
+        free(token_items);
+        return (struct tokens){0, NULL};
+    }
+
+    return (struct tokens){token_items_len, token_items};
+}
 
 // Creates every missing directory in path.
 // If the path does not end with '/', the last element is treated as a filename and is not created.
@@ -189,7 +380,7 @@ static ssize_t read_timeout(int fd, void * buf, size_t nbytes, int timeout) {
 
 // Transfered data contain [KEY]<value> pairs folowed by file content. [FILENAME] and [FILESIZE] are mandatory.
 // Example: [FILENAME]<A0000001.FCS>[FILESIZE]<9732>FCS2.0...
-static void recv_loop() {
+static void recv_loop(struct tokens tokens) {
     int port_fd;
     if ((port_fd = open(port_dev, O_RDWR | O_NOCTTY)) == -1) {
         log_fmtmsg(LOG_ERROR, "Cannot open port \"%s\": %s", port_dev, strerror(errno));
@@ -328,7 +519,7 @@ static void recv_loop() {
                     }
                     buf_data_len = 0;
                 } else {
-                    if (++buf_data_len >= sizeof(buf)) {
+                    if (buf_data_len > sizeof(received_file_name) || ++buf_data_len >= sizeof(buf)) {
                         log_msg(LOG_ERROR, "Received FILENAME is too long");
                         state = READ_DISCARD_UNTIL_TIMEOUT;
                         buf_data_len = 0;
@@ -377,7 +568,13 @@ static void recv_loop() {
                         requested_reading_len = sizeof(buf);
                         break;
                     }
-                    storage_file_path = sprintf_malloc("%s/%s", storage_dir, rcv_file_name);
+                    if (storage_dir) {
+                        storage_file_path = sprintf_malloc("%s/%s", storage_dir, rcv_file_name);
+                    } else {
+                        strncpy(received_file_name, rcv_file_name, sizeof(received_file_name) - 1);
+                        received_file_name[sizeof(received_file_name) - 1] = '\0';
+                        storage_file_path = create_file_path(tokens);
+                    }
                     log_fmtmsg(
                         LOG_INFO,
                         "Incoming file \"%s\" with length %u will be stored in \"%s\"",
@@ -508,11 +705,17 @@ static void print_help() {
         "and you are welcome to redistribute it under the terms of the GNU GPL v2.\n\n");
 
     printf(
-        "Usage: cyflowrec [%s] %s=<port> [%s=<policy>] %s=<path> [%s=<0/1>]\n\n",
+        "Usage: cyflowrec [%s] %s=<port> [%s=<policy>] %s=<path> [%s=<0/1>]\n"
+        "  or:  cyflowrec [%s] %s=<port> [%s=<policy>] %s=<path> [%s=<0/1>]\n\n",
         ARG_HELP,
         ARG_PORT_DEV,
         ARG_STORAGE_FILE_EXISTS,
         ARG_STORAGE_DIR,
+        ARG_STORAGE_CREATE_DIRS,
+        ARG_HELP,
+        ARG_PORT_DEV,
+        ARG_STORAGE_FILE_EXISTS,
+        ARG_STORAGE_FILE_PATH,
         ARG_STORAGE_CREATE_DIRS);
 
     printf("%s%*sprint this help\n", ARG_HELP, (int)(LEFT_COLUMN_WIDTH - sizeof(ARG_HELP)), "");
@@ -545,6 +748,23 @@ static void print_help() {
         "%*sthe received one; replace by default)\n",
         ARG_STORAGE_FILE_EXISTS,
         (int)(LEFT_COLUMN_WIDTH - sizeof(ARG_STORAGE_FILE_EXISTS) - 9),
+        "",
+        LEFT_COLUMN_WIDTH,
+        "",
+        LEFT_COLUMN_WIDTH,
+        "",
+        LEFT_COLUMN_WIDTH,
+        "",
+        LEFT_COLUMN_WIDTH,
+        "");
+    printf(
+        "%s=<path>%*spath to the storage file\n"
+        "%*svariable substitution is performed\n"
+        "%*svariable format ${<var_name>}\n"
+        "%*svariables: DATE_YEAR, DATE_MONTH, DATE_DAY,\n"
+        "%*s  TIME_HOUR, TIME_MIN, TIME_SEC, RCV_NAME\n",
+        ARG_STORAGE_FILE_PATH,
+        (int)(LEFT_COLUMN_WIDTH - sizeof(ARG_STORAGE_FILE_PATH) - 7),
         "",
         LEFT_COLUMN_WIDTH,
         "",
@@ -609,6 +829,9 @@ int main(int argc, char * argv[]) {
         if (!arg_parse_value(argc, argv, &i, ARG_STORAGE_FILE_EXISTS, &file_exists)) {
             return 1;
         }
+        if (!arg_parse_value(argc, argv, &i, ARG_STORAGE_FILE_PATH, &storage_file_path)) {
+            return 1;
+        }
         if (i < argc && strcmp(argv[i], ARG_HELP) == 0) {
             print_help();
             return 0;
@@ -620,8 +843,12 @@ int main(int argc, char * argv[]) {
         }
     }
 
-    if (!storage_dir) {
-        fprintf(stderr, "Missing %s=<path> argument\n", ARG_STORAGE_DIR);
+    if (!storage_dir && !storage_file_path) {
+        fprintf(stderr, "One of the arguments %s and %s is needed\n", ARG_STORAGE_DIR, ARG_STORAGE_FILE_PATH);
+        args_error = true;
+    }
+    if (storage_dir && storage_file_path) {
+        fprintf(stderr, "Only one of the arguments %s and %s can be used\n", ARG_STORAGE_DIR, ARG_STORAGE_FILE_PATH);
         args_error = true;
     }
     if (!port_dev) {
@@ -652,7 +879,15 @@ int main(int argc, char * argv[]) {
         return 1;
     }
 
-    recv_loop();
+    static struct tokens tokens = {0};
+    if (storage_file_path) {
+        tokens = parse_storage_file_path(storage_file_path, received_file_name);
+        if (tokens.len == 0) {
+            return 1;
+        }
+    }
+
+    recv_loop(tokens);
 
     return 1;
 }
